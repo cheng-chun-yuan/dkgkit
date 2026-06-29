@@ -1,0 +1,13 @@
+[info]
+name = "dkgkit-dev-relay"
+description = "Local self-hosted relay for DKGKit coordination."
+
+[database]
+data_directory = "/usr/src/app/db"
+
+[network]
+address = "0.0.0.0"
+port = 8080
+
+[limits]
+messages_per_sec = 0

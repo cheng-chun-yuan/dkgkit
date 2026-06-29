@@ -1,0 +1,13 @@
+services:
+  nostr-relay:
+    image: scsibug/nostr-rs-relay:latest
+    container_name: dkgkit-nostr-relay
+    ports:
+      - "7777:8080"
+    volumes:
+      - ./config.toml:/usr/src/app/config.toml:ro
+      - dkgkit-relay-data:/usr/src/app/db
+    restart: unless-stopped
+
+volumes:
+  dkgkit-relay-data:
