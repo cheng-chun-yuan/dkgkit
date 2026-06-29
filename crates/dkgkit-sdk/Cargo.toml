@@ -1,0 +1,13 @@
+[package]
+name = "dkgkit-sdk"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dkgkit-bitcoin = { path = "../dkgkit-bitcoin" }
+dkgkit-core = { path = "../dkgkit-core" }
+dkgkit-frost = { path = "../dkgkit-frost" }
+dkgkit-transport = { path = "../dkgkit-transport" }

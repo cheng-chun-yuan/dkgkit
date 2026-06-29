@@ -1,0 +1,17 @@
+[package]
+name = "dkgkit-nostr"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dkgkit-core = { path = "../dkgkit-core" }
+dkgkit-transport = { path = "../dkgkit-transport" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+dkgkit-bitcoin = { path = "../dkgkit-bitcoin" }
+dkgkit-frost = { path = "../dkgkit-frost" }

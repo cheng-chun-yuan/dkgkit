@@ -1,0 +1,14 @@
+[package]
+name = "bitcoin-message-signing"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bitcoin.workspace = true
+dkgkit-bitcoin = { path = "../../crates/dkgkit-bitcoin" }
+dkgkit-sdk = { path = "../../crates/dkgkit-sdk" }
+hex.workspace = true

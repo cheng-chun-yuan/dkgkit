@@ -1,0 +1,13 @@
+[package]
+name = "vault-service"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+dkgkit-nostr = { path = "../../crates/dkgkit-nostr" }
+dkgkit-sdk = { path = "../../crates/dkgkit-sdk" }
+hex.workspace = true
