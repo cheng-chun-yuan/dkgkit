@@ -17,9 +17,11 @@ crates/dkgkit-core       session IDs, participants, threshold config, errors
 crates/dkgkit-frost      FROST and HTSS DKG/signing API surface
 crates/dkgkit-bitcoin    Bitcoin address/message-signing helpers
 crates/dkgkit-transport  transport traits only
-crates/dkgkit-nostr      Nostr transport reference implementation
+crates/dkgkit-nostr      Nostr envelope mapping, local + live (feature `live`) relay transport
 crates/dkgkit-sdk        developer-facing facade
 examples/nostr-dkg-cli   reference Nostr DKG CLI demo
+examples/self-hosted-relay        Docker nostr-rs-relay coordination channel
+examples/nostr-transport-service  live FROST DKG round-trip over a self-hosted relay
 examples/bitcoin-message-signing  end-to-end DKG plus Bitcoin message signing example
 ```
 
@@ -28,6 +30,7 @@ examples/bitcoin-message-signing  end-to-end DKG plus Bitcoin message signing ex
 
 - `dkgkit-core`: validated sessions, participants, manifests, protocol messages
 - `dkgkit-transport`: transport trait plus in-memory transport for tests/examples
+- `dkgkit-nostr`: Nostr envelope mapping, local test transport, and (feature `live`) a relay-backed `LiveNostrTransport` with NIP-44 round-2 encryption
 - `dkgkit-bitcoin`: Taproot address helpers, account child address descriptors, authorization-message digesting, BIP340 verification
 - `dkgkit-frost`: public DKG/signing API boundary, base TSS DKG, HTSS derivative-share DKG, threshold signer-set validation, HTSS rank validation, grouped threshold validation, Birkhoff interpolation coefficients, and HTSS threshold signing
 - `dkgkit-sdk`: developer-facing facade, session builder, and `HtssDkgService` entrypoints

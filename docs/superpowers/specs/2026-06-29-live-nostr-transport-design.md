@@ -129,6 +129,12 @@ The existing `NostrEnvelopeEvent` mapping is reused. It gains a `vault` tag
 alongside the current `app`, `session`, `sender`, `recipient`, `message_kind`
 tags. Routing tags stay in clear even when content is encrypted.
 
+Implementation note: vault/topic tags are added by `LiveNostrTransport` at the
+nostr-event layer (`#t = dkgkit:<vault>`); `NostrEnvelopeEvent` is unchanged. The
+transport also loops a participant's own broadcast messages into its local
+inbound buffer, because a relay does not echo a client's own events back and the
+`FrostCoordinator` pattern drains them locally.
+
 Subscription-filter tag (important): NIP-01 relays only index **single-letter**
 tags for subscription filters, so a multi-char `vault`/`app` tag is not
 filterable on a standard relay. The transport therefore also emits a
