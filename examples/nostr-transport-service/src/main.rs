@@ -17,7 +17,7 @@
 
 use dkgkit_core::{ParticipantId, SessionId};
 use dkgkit_nostr::{LiveNostrTransport, LiveNostrTransportConfig, ParticipantDirectory};
-use dkgkit_sdk::{create_frost_session, FrostCoordinator, Round1Package, Round2Package};
+use dkgkit_sdk::{create_frost_session, FrostCoordinator};
 use nostr_sdk::Keys;
 use std::time::{Duration, Instant};
 
@@ -57,34 +57,18 @@ fn make_transport(
     })
 }
 
-fn collect_round1(
+/// Poll a coordinator's `drain` closure until `want` items arrive or `timeout`
+/// elapses (relay delivery is asynchronous).
+fn collect<T>(
     coordinator: &mut FrostCoordinator<LiveNostrTransport>,
-    session: &SessionId,
     want: usize,
     timeout: Duration,
-) -> anyhow::Result<Vec<Round1Package>> {
-    let mut acc: Vec<Round1Package> = Vec::new();
+    mut drain: impl FnMut(&mut FrostCoordinator<LiveNostrTransport>) -> anyhow::Result<Vec<T>>,
+) -> anyhow::Result<Vec<T>> {
+    let mut acc = Vec::new();
     let deadline = Instant::now() + timeout;
     while acc.len() < want && Instant::now() < deadline {
-        acc.extend(coordinator.drain_round1(session)?);
-        if acc.len() < want {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
-    Ok(acc)
-}
-
-fn collect_round2_for(
-    coordinator: &mut FrostCoordinator<LiveNostrTransport>,
-    session: &SessionId,
-    recipient: ParticipantId,
-    want: usize,
-    timeout: Duration,
-) -> anyhow::Result<Vec<Round2Package>> {
-    let mut acc: Vec<Round2Package> = Vec::new();
-    let deadline = Instant::now() + timeout;
-    while acc.len() < want && Instant::now() < deadline {
-        acc.extend(coordinator.drain_round2_for(session, recipient)?);
+        acc.extend(drain(coordinator)?);
         if acc.len() < want {
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -132,9 +116,11 @@ fn main() -> anyhow::Result<()> {
         coordinators[idx].publish_round1(session.clone(), &round1)?;
     }
 
-    let mut round1_per_device: Vec<Vec<Round1Package>> = Vec::with_capacity(n);
+    let mut round1_per_device = Vec::with_capacity(n);
     for c in coordinators.iter_mut() {
-        let packages = collect_round1(c, &session, n, Duration::from_secs(20))?;
+        let packages = collect(c, n, Duration::from_secs(20), |c| {
+            Ok(c.drain_round1(&session)?)
+        })?;
         anyhow::ensure!(
             packages.len() == n,
             "a device only collected {}/{n} round1 packages",
@@ -154,13 +140,9 @@ fn main() -> anyhow::Result<()> {
     let mut shares = Vec::with_capacity(n);
     for (idx, dkg) in sessions.iter().enumerate() {
         let recipient = pid(idx as u16 + 1);
-        let round2 = collect_round2_for(
-            &mut coordinators[idx],
-            &session,
-            recipient,
-            n,
-            Duration::from_secs(20),
-        )?;
+        let round2 = collect(&mut coordinators[idx], n, Duration::from_secs(20), |c| {
+            Ok(c.drain_round2_for(&session, recipient)?)
+        })?;
         anyhow::ensure!(
             round2.len() == n,
             "participant {} only collected {}/{n} round2 shares",
