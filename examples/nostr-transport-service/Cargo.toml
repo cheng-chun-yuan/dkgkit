@@ -1,0 +1,15 @@
+[package]
+name = "nostr-transport-service"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+hex.workspace = true
+dkgkit-core = { path = "../../crates/dkgkit-core" }
+dkgkit-sdk = { path = "../../crates/dkgkit-sdk" }
+dkgkit-nostr = { path = "../../crates/dkgkit-nostr", features = ["live"] }
+nostr-sdk.workspace = true

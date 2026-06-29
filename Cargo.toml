@@ -8,6 +8,7 @@ members = [
     "crates/dkgkit-sdk",
     "examples/bitcoin-message-signing",
     "examples/nostr-dkg-cli",
+    "examples/nostr-transport-service",
     "examples/vault-service",
 ]
 resolver = "2"
