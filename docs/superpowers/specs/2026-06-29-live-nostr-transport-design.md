@@ -215,6 +215,28 @@ produce `.md` plans.
   `cargo check --workspace`, `cargo test --workspace`, and the same with
   `--features live` for `dkgkit-nostr`.
 
+## A.8 Self-hosted relay example (the coordination channel)
+
+The "channel" for a vault is a self-hosted relay plus the vault topic tag
+(`#t = dkgkit:<vault_tag>`) that scopes all of that vault's traffic. A ships two
+runnable artifacts so this can be stood up and proven locally:
+
+- `examples/self-hosted-relay/` — `docker-compose.yml` running `nostr-rs-relay`
+  on `ws://127.0.0.1:7777`, a `config.toml`, and a `README.md` with start/stop
+  instructions and `export DKGKIT_TEST_RELAY=ws://127.0.0.1:7777`.
+- `examples/relay-smoke/` — a small Rust binary (added to the workspace) that
+  builds a `LiveNostrTransport`, connects to the relay, publishes a message, and
+  drains it back. This is the first end-to-end proof of A and is reused by the
+  `DKGKIT_TEST_RELAY` integration test.
+
+Run:
+
+```bash
+docker compose -f examples/self-hosted-relay/docker-compose.yml up -d
+export DKGKIT_TEST_RELAY=ws://127.0.0.1:7777
+cargo run -p relay-smoke --features dkgkit-nostr/live
+```
+
 ## Acceptance criteria for A
 
 - `LiveNostrTransport` implements `Transport` and is driven by an unchanged
@@ -227,6 +249,9 @@ produce `.md` plans.
 - Default `cargo test --workspace` passes with no relay and no `live` feature.
 - No secret material (round-2 plaintext, secret nonces, coefficients) is ever
   logged or published in clear.
+- `docker compose -f examples/self-hosted-relay/docker-compose.yml up` starts a
+  local relay, and `cargo run -p relay-smoke` publishes and drains a message
+  through it.
 
 ## Forward scope captured for sub-project B (not built in A)
 
