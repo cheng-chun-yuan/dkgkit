@@ -11,7 +11,14 @@ dkgkit-core = { path = "../dkgkit-core" }
 dkgkit-transport = { path = "../dkgkit-transport" }
 serde.workspace = true
 serde_json.workspace = true
+nostr-sdk = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[features]
+default = []
+live = ["dep:nostr-sdk", "dep:tokio"]
 
 [dev-dependencies]
 dkgkit-bitcoin = { path = "../dkgkit-bitcoin" }
 dkgkit-frost = { path = "../dkgkit-frost" }
+hex.workspace = true

@@ -10,6 +10,12 @@ use dkgkit_core::{
 use dkgkit_transport::Transport;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "live")]
+mod live;
+
+#[cfg(feature = "live")]
+pub use live::{LiveNostrTransport, LiveNostrTransportConfig, ParticipantDirectory};
+
 pub const DKGKIT_NOSTR_EVENT_KIND: u64 = 30333;
 pub const DKGKIT_NOSTR_APP_TAG: &str = "dkgkit";
 
