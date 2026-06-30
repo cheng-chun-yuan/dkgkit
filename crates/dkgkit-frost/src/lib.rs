@@ -1185,8 +1185,10 @@ pub fn htss_sign_share_for_output(
             "HTSS aggregate nonce session mismatch".to_string(),
         ));
     }
-    let output_public_key = Point::<EvenY, Public>::from_xonly_bytes(output_xonly)
-        .ok_or_else(|| DkgKitError::Protocol("invalid HTSS output x-only public key".to_string()))?;
+    let output_public_key =
+        Point::<EvenY, Public>::from_xonly_bytes(output_xonly).ok_or_else(|| {
+            DkgKitError::Protocol("invalid HTSS output x-only public key".to_string())
+        })?;
     let schnorr = schnorr_fun::Schnorr::<Sha256>::verify_only();
     let challenge = schnorr.challenge(
         &aggregate_nonce.even_public_nonce,
@@ -1258,8 +1260,10 @@ pub fn aggregate_htss_signature_shares_for_output(
             })?;
         s = scalar_add(s, share_value);
     }
-    let output_public_key = Point::<EvenY, Public>::from_xonly_bytes(output_xonly)
-        .ok_or_else(|| DkgKitError::Protocol("invalid HTSS output x-only public key".to_string()))?;
+    let output_public_key =
+        Point::<EvenY, Public>::from_xonly_bytes(output_xonly).ok_or_else(|| {
+            DkgKitError::Protocol("invalid HTSS output x-only public key".to_string())
+        })?;
     let schnorr = schnorr_fun::Schnorr::<Sha256>::verify_only();
     // s' = Σ shares + e·B, where e = H(R, Q, m) is the output-key challenge.
     let challenge = schnorr.challenge(
