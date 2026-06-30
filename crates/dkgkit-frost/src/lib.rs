@@ -1128,6 +1128,244 @@ pub fn aggregate_htss_signature_shares(
     AggregateSignature::new(signature.to_bytes().to_vec())
 }
 
+/// Sign an HTSS share for a tweaked Taproot output key `Q = A·P + B·G`, where
+/// `P` is the vault group key, `A = ±1`, and `B` is an additive tweak. The
+/// challenge commits to `output_xonly` (the BIP341 output key x-coordinate), and
+/// `negate_key` (= `A == -1`) flips the key term so the aggregate verifies under
+/// the output key instead of the raw group key. This is what lets a vault sign a
+/// real key-path spend of a BIP86 child address derived from its group key.
+///
+/// Identical to [`htss_sign_share`] except for the challenge key and the key-term
+/// sign; the nonce, Birkhoff coefficient, and share handling are unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn htss_sign_share_for_output(
+    group_key: &GroupKey,
+    digest: [u8; 32],
+    output_xonly: [u8; 32],
+    negate_key: bool,
+    local_share: &HtssLocalKeyShare,
+    nonce: &HtssLocalNonce,
+    nonces: &[HtssNoncePackage],
+    signer_set: &[ParticipantId],
+    config: &HierarchicalThresholdConfig,
+) -> Result<HtssSignatureSharePackage> {
+    if local_share.participant_id != nonce.package.participant_id {
+        return Err(DkgKitError::Protocol(format!(
+            "HTSS nonce participant mismatch: share {}, nonce {}",
+            local_share.participant_id.0, nonce.package.participant_id.0
+        )));
+    }
+    if !signer_set.contains(&local_share.participant_id) {
+        return Err(DkgKitError::Protocol(format!(
+            "participant {} is not in HTSS signer set",
+            local_share.participant_id.0
+        )));
+    }
+    let _ = group_key;
+
+    let coefficients = birkhoff_interpolation_coefficients(
+        &birkhoff_points_from_hierarchical_signer_set(signer_set, config)?,
+    )?;
+    let coefficient = coefficients
+        .iter()
+        .find(|coefficient| coefficient.participant_id == local_share.participant_id)
+        .ok_or(DkgKitError::MissingRankedParticipant(
+            local_share.participant_id.0,
+        ))?;
+    if local_share.rank != coefficient.derivative_order {
+        return Err(DkgKitError::Protocol(format!(
+            "HTSS share rank mismatch for participant {}: share rank {}, coefficient rank {}",
+            local_share.participant_id.0, local_share.rank, coefficient.derivative_order
+        )));
+    }
+
+    let aggregate_nonce = aggregate_htss_public_nonce(nonces, signer_set)?;
+    if aggregate_nonce.signing_session_id != nonce.package.signing_session_id {
+        return Err(DkgKitError::Protocol(
+            "HTSS aggregate nonce session mismatch".to_string(),
+        ));
+    }
+    let output_public_key = Point::<EvenY, Public>::from_xonly_bytes(output_xonly)
+        .ok_or_else(|| DkgKitError::Protocol("invalid HTSS output x-only public key".to_string()))?;
+    let schnorr = schnorr_fun::Schnorr::<Sha256>::verify_only();
+    let challenge = schnorr.challenge(
+        &aggregate_nonce.even_public_nonce,
+        &output_public_key,
+        frost_message(&digest),
+    );
+
+    let mut secret_nonce = Scalar::<Public, Zero>::from_bytes(nonce.secret_nonce_bytes)
+        .ok_or_else(|| {
+            DkgKitError::Protocol(format!(
+                "invalid HTSS secret nonce scalar for participant {}",
+                nonce.package.participant_id.0
+            ))
+        })?;
+    secret_nonce.conditional_negate(aggregate_nonce.negated);
+    let coefficient_value = Scalar::<Public, Zero>::from_bytes(coefficient.coefficient_bytes)
+        .ok_or_else(|| {
+            DkgKitError::Protocol(format!(
+                "invalid Birkhoff coefficient scalar for participant {}",
+                coefficient.participant_id.0
+            ))
+        })?;
+    let share_value = Scalar::<Public, Zero>::from_bytes(local_share.share_value_bytes)
+        .ok_or_else(|| {
+            DkgKitError::Protocol(format!(
+                "invalid HTSS share scalar for participant {}",
+                local_share.participant_id.0
+            ))
+        })?;
+    let weighted_share = scalar_mul(coefficient_value, share_value);
+    // Flip the key term by A so `Σ shares = K ± e·d` matches the A·P part of Q.
+    let mut key_challenge = challenge;
+    key_challenge.conditional_negate(negate_key);
+    let challenge_share = scalar_mul(key_challenge, weighted_share);
+    let signature_share = scalar_add(secret_nonce, challenge_share);
+    Ok(HtssSignatureSharePackage {
+        participant_id: local_share.participant_id,
+        signing_session_id: nonce.package.signing_session_id.clone(),
+        signature_share_bytes: signature_share.to_bytes(),
+    })
+}
+
+/// Aggregate HTSS shares produced by [`htss_sign_share_for_output`] into a
+/// BIP340 signature valid under the tweaked output key. Adds `e·B` (the
+/// output-key challenge times the additive tweak) to the share sum, then verifies
+/// the result under `output_xonly`.
+#[allow(clippy::too_many_arguments)]
+pub fn aggregate_htss_signature_shares_for_output(
+    digest: [u8; 32],
+    output_xonly: [u8; 32],
+    tweak: [u8; 32],
+    nonces: &[HtssNoncePackage],
+    shares: &[HtssSignatureSharePackage],
+    signer_set: &[ParticipantId],
+    config: &HierarchicalThresholdConfig,
+) -> Result<AggregateSignature> {
+    validate_hierarchical_signer_set(signer_set, config)?;
+    validate_htss_nonce_set(nonces, signer_set)?;
+    validate_htss_signature_share_set(shares, signer_set)?;
+    let aggregate_nonce = aggregate_htss_public_nonce(nonces, signer_set)?;
+    let mut s = scalar_zero();
+    for share in shares {
+        let share_value = Scalar::<Public, Zero>::from_bytes(share.signature_share_bytes)
+            .ok_or_else(|| {
+                DkgKitError::Protocol(format!(
+                    "invalid HTSS signature share scalar for participant {}",
+                    share.participant_id.0
+                ))
+            })?;
+        s = scalar_add(s, share_value);
+    }
+    let output_public_key = Point::<EvenY, Public>::from_xonly_bytes(output_xonly)
+        .ok_or_else(|| DkgKitError::Protocol("invalid HTSS output x-only public key".to_string()))?;
+    let schnorr = schnorr_fun::Schnorr::<Sha256>::verify_only();
+    // s' = Σ shares + e·B, where e = H(R, Q, m) is the output-key challenge.
+    let challenge = schnorr.challenge(
+        &aggregate_nonce.even_public_nonce,
+        &output_public_key,
+        frost_message(&digest),
+    );
+    let tweak_scalar = Scalar::<Public, Zero>::from_bytes(tweak)
+        .ok_or_else(|| DkgKitError::Protocol("invalid Taproot tweak scalar".to_string()))?;
+    s = scalar_add(s, scalar_mul(challenge, tweak_scalar));
+    let signature = schnorr_fun::Signature {
+        R: aggregate_nonce.even_public_nonce,
+        s,
+    };
+    if !schnorr.verify(&output_public_key, frost_message(&digest), &signature) {
+        return Err(DkgKitError::Protocol(
+            "HTSS tweaked aggregate signature verification failed".to_string(),
+        ));
+    }
+    AggregateSignature::new(signature.to_bytes().to_vec())
+}
+
+/// Local convenience signer for a tweaked output key: runs the full HTSS round
+/// (nonce → share → aggregate) with [`htss_sign_share_for_output`].
+#[allow(clippy::too_many_arguments)]
+pub fn sign_digest_with_local_htss_threshold_shares_for_output(
+    group_key: &GroupKey,
+    digest: [u8; 32],
+    output_xonly: [u8; 32],
+    tweak: [u8; 32],
+    negate_key: bool,
+    shares: &[HtssLocalKeyShare],
+    signer_set: &[ParticipantId],
+    config: &HierarchicalThresholdConfig,
+) -> Result<AggregateSignature> {
+    let selected_shares = signer_set
+        .iter()
+        .map(|participant_id| {
+            shares
+                .iter()
+                .find(|share| share.participant_id == *participant_id)
+                .ok_or(DkgKitError::MissingRankedParticipant(participant_id.0))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let signing_session_id = SessionId::new("local-htss-threshold-output-signing")?;
+    let nonces = selected_shares
+        .iter()
+        .map(|share| htss_nonce(signing_session_id.clone(), share))
+        .collect::<Result<Vec<_>>>()?;
+    let public_nonces = nonces
+        .iter()
+        .map(|nonce| nonce.package.clone())
+        .collect::<Vec<_>>();
+    let signature_shares = selected_shares
+        .iter()
+        .zip(nonces.iter())
+        .map(|(share, nonce)| {
+            htss_sign_share_for_output(
+                group_key,
+                digest,
+                output_xonly,
+                negate_key,
+                share,
+                nonce,
+                &public_nonces,
+                signer_set,
+                config,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    aggregate_htss_signature_shares_for_output(
+        digest,
+        output_xonly,
+        tweak,
+        &public_nonces,
+        &signature_shares,
+        signer_set,
+        config,
+    )
+}
+
+/// Grouped-config wrapper for [`sign_digest_with_local_htss_threshold_shares_for_output`].
+#[allow(clippy::too_many_arguments)]
+pub fn sign_digest_with_local_grouped_htss_threshold_shares_for_output(
+    group_key: &GroupKey,
+    digest: [u8; 32],
+    output_xonly: [u8; 32],
+    tweak: [u8; 32],
+    negate_key: bool,
+    shares: &[HtssLocalKeyShare],
+    signer_set: &[ParticipantId],
+    config: &GroupedThresholdConfig,
+) -> Result<AggregateSignature> {
+    validate_grouped_threshold_signer_set(signer_set, config)?;
+    sign_digest_with_local_htss_threshold_shares_for_output(
+        group_key,
+        digest,
+        output_xonly,
+        tweak,
+        negate_key,
+        shares,
+        signer_set,
+        &hierarchical_config_from_grouped_threshold(config)?,
+    )
+}
+
 pub fn sign_digest_with_local_htss_threshold_shares(
     group_key: &GroupKey,
     digest: [u8; 32],
@@ -2514,6 +2752,59 @@ mod tests {
             Point::<EvenY, Public>::from_xonly_bytes(keyset.group_key.xonly_public_key).unwrap();
         let schnorr = schnorr_fun::Schnorr::<Sha256>::verify_only();
         assert!(schnorr.verify(&public_key, frost_message(&digest), &signature));
+    }
+
+    #[test]
+    fn tweaked_output_key_signature_verifies_both_parities() {
+        let config = grouped_config_123_of_235();
+        let keyset = run_local_grouped_htss_keygen(&config).unwrap();
+        let signer_set = vec![pid(1), pid(3), pid(4), pid(6), pid(7), pid(8)];
+        let digest = [29u8; 32];
+        let group_point =
+            Point::<EvenY, Public>::from_xonly_bytes(keyset.group_key.xonly_public_key).unwrap();
+
+        let mut saw_even = false;
+        let mut saw_odd = false;
+        // Output key Q = lift_x(P + t·G). When P + t·G has odd Y the effective key
+        // is its negation, so both the key term and the additive tweak flip sign.
+        for raw in 1u32..=8 {
+            let t = scalar_from_u32(raw);
+            let q = g!(group_point + t * G).normalize().non_zero().unwrap();
+            let (q_even, was_odd) = q.into_point_with_even_y();
+            let negate_key = was_odd;
+            let mut tweak = scalar_from_u32(raw);
+            tweak.conditional_negate(was_odd);
+            let output_xonly = q_even.to_xonly_bytes();
+
+            let signature = sign_digest_with_local_grouped_htss_threshold_shares_for_output(
+                &keyset.group_key,
+                digest,
+                output_xonly,
+                tweak.to_bytes(),
+                negate_key,
+                &keyset.shares,
+                &signer_set,
+                &config,
+            )
+            .unwrap();
+
+            let signature_bytes: [u8; 64] = signature.signature_bytes.try_into().unwrap();
+            let signature = Signature::from_bytes(signature_bytes).unwrap();
+            let schnorr = schnorr_fun::Schnorr::<Sha256>::verify_only();
+            assert!(
+                schnorr.verify(&q_even, frost_message(&digest), &signature),
+                "tweaked signature failed to verify for tweak {raw} (odd={was_odd})"
+            );
+            if was_odd {
+                saw_odd = true;
+            } else {
+                saw_even = true;
+            }
+        }
+        assert!(
+            saw_even && saw_odd,
+            "test must exercise both output-key parities"
+        );
     }
 
     #[test]
