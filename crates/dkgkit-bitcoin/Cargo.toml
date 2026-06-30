@@ -13,3 +13,6 @@ dkgkit-frost = { path = "../dkgkit-frost" }
 hex.workspace = true
 serde.workspace = true
 sha2.workspace = true
+
+[dev-dependencies]
+dkgkit-core = { path = "../dkgkit-core" }

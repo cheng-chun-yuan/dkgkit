@@ -377,6 +377,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bitcoin",
+ "dkgkit-core",
  "dkgkit-frost",
  "hex",
  "serde",
