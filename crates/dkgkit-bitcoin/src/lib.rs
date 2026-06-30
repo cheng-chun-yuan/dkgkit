@@ -413,6 +413,46 @@ pub fn silent_payment_output_tweak(group_key: &GroupKey, k: [u8; 32]) -> Result<
     })
 }
 
+/// The [`TaprootKeyTweak`] for signing under a silent-payment leaf key
+/// `P = B_spend + k·G` *directly* (x-only), with NO BIP341 output tweak.
+///
+/// Arkade VTXOs use a NUMS taproot internal key and are spent collaboratively via
+/// the forfeit tapscript leaf (`checkSig(P) && checkSig(server)`), so the
+/// recipient signs the leaf sighash under the leaf pubkey `P` itself — not a
+/// taproot-tweaked output key. A grouped HTSS quorum for the vault group key
+/// `B_spend` produces that signature by applying the per-payment tweak `k`. Use
+/// [`silent_payment_output_tweak`] instead for a BIP341 key-path output.
+pub fn silent_payment_leaf_tweak(group_key: &GroupKey, k: [u8; 32]) -> Result<TaprootKeyTweak> {
+    let secp = Secp256k1::verification_only();
+    let account_xonly = SecpXOnlyPublicKey::from_slice(&group_key.xonly_public_key)
+        .map_err(|err| anyhow!("invalid group x-only public key: {err}"))?;
+    let p_even = account_xonly.public_key(Parity::Even);
+
+    let k_secret = SecretKey::from_slice(&k)
+        .map_err(|err| anyhow!("invalid silent-payment tweak scalar: {err}"))?;
+    let k_scalar = SecpScalar::from_be_bytes(k)
+        .map_err(|err| anyhow!("invalid silent-payment tweak scalar: {err}"))?;
+
+    // Leaf key P = B_spend(even) + k·G; sign under its x-only form.
+    let p_point = p_even
+        .add_exp_tweak(&secp, &k_scalar)
+        .map_err(|err| anyhow!("silent-payment point derivation failed: {err}"))?;
+    let (p_xonly, p_parity) = p_point.x_only_public_key();
+    let p_was_odd = p_parity == Parity::Odd;
+
+    // even-Y(P): if P is odd-Y, negate both the key term and k.
+    let tweak_secret = if p_was_odd {
+        k_secret.negate()
+    } else {
+        k_secret
+    };
+    Ok(TaprootKeyTweak {
+        output_xonly: p_xonly.serialize(),
+        tweak: tweak_secret.secret_bytes(),
+        negate_key: p_was_odd,
+    })
+}
+
 pub fn parse_network(network: &str) -> Result<Network> {
     match network {
         "bitcoin" | "mainnet" => Ok(Network::Bitcoin),
@@ -842,6 +882,57 @@ mod tests {
         assert!(secp
             .verify_schnorr(&signature, &message, &output_xonly)
             .is_ok());
+    }
+
+    #[test]
+    fn silent_payment_leaf_signature_validates_under_leaf_key() {
+        let (config, keyset) = demo_grouped_keyset();
+        let k = [0x22u8; 32];
+        let tweak = silent_payment_leaf_tweak(&keyset.group_key, k).unwrap();
+
+        let secp = Secp256k1::new();
+        let account_xonly =
+            SecpXOnlyPublicKey::from_slice(&keyset.group_key.xonly_public_key).unwrap();
+        let p = account_xonly.public_key(Parity::Even);
+
+        // output_xonly is the x-only of the leaf key P = B_spend(even) + k·G.
+        let leaf = p
+            .add_exp_tweak(&secp, &SecpScalar::from_be_bytes(k).unwrap())
+            .unwrap();
+        let (leaf_xonly, _) = leaf.x_only_public_key();
+        assert_eq!(leaf_xonly.serialize(), tweak.output_xonly);
+
+        // A·P + B·G == even-Y leaf key (no taproot tweak).
+        let p_term = if tweak.negate_key { p.negate(&secp) } else { p };
+        let q = p_term
+            .add_exp_tweak(&secp, &SecpScalar::from_be_bytes(tweak.tweak).unwrap())
+            .unwrap();
+        let (q_xonly, q_parity) = q.x_only_public_key();
+        assert_eq!(q_xonly.serialize(), tweak.output_xonly);
+        assert_eq!(q_parity, Parity::Even);
+
+        // Grouped HTSS threshold-sign a leaf sighash; verify under the leaf key.
+        let signer_set = [1, 3, 4, 6, 7, 8]
+            .into_iter()
+            .map(|id| ParticipantId::new(id).unwrap())
+            .collect::<Vec<_>>();
+        let digest = [0x7bu8; 32];
+        let signature = sign_digest_with_local_grouped_htss_threshold_shares_for_output(
+            &keyset.group_key,
+            digest,
+            tweak.output_xonly,
+            tweak.tweak,
+            tweak.negate_key,
+            &keyset.shares,
+            &signer_set,
+            &config,
+        )
+        .unwrap();
+        let signature_bytes: [u8; 64] = signature.signature_bytes.try_into().unwrap();
+        let signature = Signature::from_slice(&signature_bytes).unwrap();
+        let message = Message::from_digest(digest);
+        let leaf_key = SecpXOnlyPublicKey::from_slice(&tweak.output_xonly).unwrap();
+        assert!(secp.verify_schnorr(&signature, &message, &leaf_key).is_ok());
     }
 
     #[test]
