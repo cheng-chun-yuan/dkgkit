@@ -353,6 +353,66 @@ pub fn taproot_child_key_tweak(
     })
 }
 
+/// The [`TaprootKeyTweak`] for a BIP-352 silent-payment output funded against a
+/// vault group key. The output key is the BIP341 key-path spend key of
+/// `P = B_spend + k·G`, where `B_spend` is the vault group key (even-Y lift) and
+/// `k` is the per-payment silent-payment tweak scalar (32 big-endian bytes). A
+/// grouped threshold signer for the group key can spend the resulting output via
+/// [`dkgkit_frost::sign_digest_with_local_grouped_htss_threshold_shares_for_output`]
+/// with these values.
+///
+/// Venue-agnostic: whether `P` locks an on-chain UTXO or an Arkade VTXO `userPK`,
+/// the spend is the same BIP340 key-path Schnorr signature over the same taproot
+/// key — so the FROST quorum signs an Arkade `VTXO(P)` exactly as it would an
+/// on-chain output. This mirrors [`taproot_child_key_tweak`] with the BIP32 child
+/// tweak replaced by the silent-payment tweak `k`.
+pub fn silent_payment_output_tweak(group_key: &GroupKey, k: [u8; 32]) -> Result<TaprootKeyTweak> {
+    let secp = Secp256k1::verification_only();
+    let account_xonly = SecpXOnlyPublicKey::from_slice(&group_key.xonly_public_key)
+        .map_err(|err| anyhow!("invalid group x-only public key: {err}"))?;
+    let p_even = account_xonly.public_key(Parity::Even);
+
+    // Inner additive tweak k — the silent-payment per-output tweak scalar.
+    let k_secret = SecretKey::from_slice(&k)
+        .map_err(|err| anyhow!("invalid silent-payment tweak scalar: {err}"))?;
+    let k_scalar = SecpScalar::from_be_bytes(k)
+        .map_err(|err| anyhow!("invalid silent-payment tweak scalar: {err}"))?;
+
+    // Internal key P_sp = B_spend(even) + k·G.
+    let internal_point = p_even
+        .add_exp_tweak(&secp, &k_scalar)
+        .map_err(|err| anyhow!("silent-payment point derivation failed: {err}"))?;
+    let (internal_xonly, internal_parity) = internal_point.x_only_public_key();
+    let internal_was_odd = internal_parity == Parity::Odd;
+
+    // BIP341 taproot tweak (key-path only, no script tree) and output parity.
+    let tap_tweak = TapTweakHash::from_key_and_tweak(internal_xonly, None).to_scalar();
+    let (output_key, output_parity) = internal_xonly.tap_tweak(&secp, None);
+    let output_was_odd = output_parity == Parity::Odd;
+    let output_xonly = output_key.to_x_only_public_key().serialize();
+
+    // B = s_out·(s_internal·k + t_tap).
+    let inner = if internal_was_odd {
+        k_secret.negate()
+    } else {
+        k_secret
+    };
+    let inner = inner
+        .add_tweak(&tap_tweak)
+        .map_err(|err| anyhow!("taproot tweak accumulation failed: {err}"))?;
+    let tweak_secret = if output_was_odd {
+        inner.negate()
+    } else {
+        inner
+    };
+
+    Ok(TaprootKeyTweak {
+        output_xonly,
+        tweak: tweak_secret.secret_bytes(),
+        negate_key: internal_was_odd ^ output_was_odd,
+    })
+}
+
 pub fn parse_network(network: &str) -> Result<Network> {
     match network {
         "bitcoin" | "mainnet" => Ok(Network::Bitcoin),
@@ -699,6 +759,65 @@ mod tests {
         assert_eq!(q_parity, Parity::Even);
 
         // Threshold-sign a digest for the output key and verify it like Bitcoin Core.
+        let signer_set = [1, 3, 4, 6, 7, 8]
+            .into_iter()
+            .map(|id| ParticipantId::new(id).unwrap())
+            .collect::<Vec<_>>();
+        let digest = [0x5au8; 32];
+        let signature = sign_digest_with_local_grouped_htss_threshold_shares_for_output(
+            &keyset.group_key,
+            digest,
+            tweak.output_xonly,
+            tweak.tweak,
+            tweak.negate_key,
+            &keyset.shares,
+            &signer_set,
+            &config,
+        )
+        .unwrap();
+
+        let signature_bytes: [u8; 64] = signature.signature_bytes.try_into().unwrap();
+        let signature = Signature::from_slice(&signature_bytes).unwrap();
+        let message = Message::from_digest(digest);
+        let output_xonly = SecpXOnlyPublicKey::from_slice(&tweak.output_xonly).unwrap();
+        assert!(secp
+            .verify_schnorr(&signature, &message, &output_xonly)
+            .is_ok());
+    }
+
+    #[test]
+    fn silent_payment_spend_signature_validates_under_output_key() {
+        let (config, keyset) = demo_grouped_keyset();
+        // An arbitrary silent-payment per-output tweak scalar k.
+        let k = [0x11u8; 32];
+        let tweak = silent_payment_output_tweak(&keyset.group_key, k).unwrap();
+
+        let secp = Secp256k1::new();
+        let account_xonly =
+            SecpXOnlyPublicKey::from_slice(&keyset.group_key.xonly_public_key).unwrap();
+        let p = account_xonly.public_key(Parity::Even);
+
+        // Public-key relation: A·P + B·G == even-Y output key.
+        let p_term = if tweak.negate_key { p.negate(&secp) } else { p };
+        let q = p_term
+            .add_exp_tweak(&secp, &SecpScalar::from_be_bytes(tweak.tweak).unwrap())
+            .unwrap();
+        let (q_xonly, q_parity) = q.x_only_public_key();
+        assert_eq!(q_xonly.serialize(), tweak.output_xonly);
+        assert_eq!(q_parity, Parity::Even);
+
+        // Output key equals taproot(B_spend + k·G) computed independently.
+        let internal = p
+            .add_exp_tweak(&secp, &SecpScalar::from_be_bytes(k).unwrap())
+            .unwrap();
+        let (internal_xonly, _) = internal.x_only_public_key();
+        let (expected_output, _) = internal_xonly.tap_tweak(&secp, None);
+        assert_eq!(
+            expected_output.to_x_only_public_key().serialize(),
+            tweak.output_xonly
+        );
+
+        // Grouped HTSS threshold-sign for the output key and verify like Bitcoin Core.
         let signer_set = [1, 3, 4, 6, 7, 8]
             .into_iter()
             .map(|id| ParticipantId::new(id).unwrap())
