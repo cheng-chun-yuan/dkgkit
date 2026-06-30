@@ -311,7 +311,9 @@ pub fn taproot_child_key_tweak(
             .map_err(|err| anyhow!("BIP32 point derivation failed: {err}"))?;
         chain_code = i[32..].try_into().expect("32-byte chain code");
         bip32_tweak = Some(match bip32_tweak {
-            None => SecretKey::from_slice(&il).map_err(|err| anyhow!("invalid BIP32 tweak: {err}"))?,
+            None => {
+                SecretKey::from_slice(&il).map_err(|err| anyhow!("invalid BIP32 tweak: {err}"))?
+            }
             Some(acc) => acc
                 .add_tweak(&il_scalar)
                 .map_err(|err| anyhow!("BIP32 tweak accumulation failed: {err}"))?,
@@ -338,7 +340,11 @@ pub fn taproot_child_key_tweak(
     let inner = inner
         .add_tweak(&tap_tweak)
         .map_err(|err| anyhow!("taproot tweak accumulation failed: {err}"))?;
-    let tweak_secret = if output_was_odd { inner.negate() } else { inner };
+    let tweak_secret = if output_was_odd {
+        inner.negate()
+    } else {
+        inner
+    };
 
     Ok(TaprootKeyTweak {
         output_xonly,
@@ -543,8 +549,8 @@ mod tests {
         GroupThresholdRequirement, GroupedThresholdConfig, ParticipantId, RankedParticipant,
     };
     use dkgkit_frost::{
-        run_local_grouped_htss_keygen, sign_digest_with_local_grouped_htss_threshold_shares_for_output,
-        HtssLocalKeySet,
+        run_local_grouped_htss_keygen,
+        sign_digest_with_local_grouped_htss_threshold_shares_for_output, HtssLocalKeySet,
     };
 
     /// A 1/2 + 2/3 + 3/5 grouped HTSS vault, matching the btech demo policy.
@@ -585,9 +591,10 @@ mod tests {
         let (config, keyset) = demo_grouped_keyset();
         let account = BitcoinAccountKey::new(keyset.group_key.clone(), [42u8; 32]);
         let path = BitcoinDerivationPath::bip86(0, 0, 0);
-        let vault_address = taproot_child_address_descriptor_for_network(&account, "regtest", path.clone())
-            .unwrap()
-            .address;
+        let vault_address =
+            taproot_child_address_descriptor_for_network(&account, "regtest", path.clone())
+                .unwrap()
+                .address;
         let tweak = taproot_child_key_tweak(&account, "regtest", path).unwrap();
 
         // Spend a 500-BTC UTXO: 1 BTC out, the rest back as change minus fee.
@@ -668,11 +675,15 @@ mod tests {
         let path = BitcoinDerivationPath::bip86(0, 0, 0);
 
         let descriptor =
-            taproot_child_address_descriptor_for_network(&account, "regtest", path.clone()).unwrap();
+            taproot_child_address_descriptor_for_network(&account, "regtest", path.clone())
+                .unwrap();
         let tweak = taproot_child_key_tweak(&account, "regtest", path).unwrap();
 
         // The derived output key must equal the one the receive address commits to.
-        assert_eq!(hex::encode(tweak.output_xonly), descriptor.xonly_public_key_hex);
+        assert_eq!(
+            hex::encode(tweak.output_xonly),
+            descriptor.xonly_public_key_hex
+        );
 
         // Public-key relation: A·P + B·G == even-Y output key.
         let secp = Secp256k1::new();
