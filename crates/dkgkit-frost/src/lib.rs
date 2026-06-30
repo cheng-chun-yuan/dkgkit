@@ -3067,8 +3067,7 @@ mod tests {
         .unwrap();
 
         let reconstruct_set = vec![pid(1), pid(2), pid(4)]; // valid under old_config
-        let resharded =
-            reshare_htss(&keyset, &old_config, &reconstruct_set, &new_config).unwrap();
+        let resharded = reshare_htss(&keyset, &old_config, &reconstruct_set, &new_config).unwrap();
 
         // Group key (and therefore the address) is unchanged.
         assert_eq!(
