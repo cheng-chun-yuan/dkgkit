@@ -737,6 +737,73 @@ pub fn run_local_htss_keygen(config: &HierarchicalThresholdConfig) -> Result<Hts
     })
 }
 
+/// Reshare an HTSS key set to a new policy WITHOUT changing the group key.
+///
+/// Reconstructs the secret `f(0)` from a policy-valid subset of the *current*
+/// shares (`reconstruct_set` must be valid under `old_config`), then re-deals a
+/// fresh polynomial whose constant term is that same secret over `new_config`.
+/// Because `f(0)` is unchanged, the group public key — and therefore the Bitcoin
+/// receive address — is identical. Higher polynomial coefficients are random, so
+/// the new shares are independent of the old ones (a proactive refresh).
+///
+/// Errors if reconstruction fails, the secret is zero, or — critically — the
+/// re-derived group key would differ from `old.group_key`.
+pub fn reshare_htss(
+    old: &HtssLocalKeySet,
+    old_config: &HierarchicalThresholdConfig,
+    reconstruct_set: &[ParticipantId],
+    new_config: &HierarchicalThresholdConfig,
+) -> Result<HtssLocalKeySet> {
+    // 1. Reconstruct f(0) from a valid subset of the current shares.
+    let secret_bytes = reconstruct_htss_secret_scalar(&old.shares, reconstruct_set, old_config)?;
+    let secret = Scalar::<Secret, Zero>::from_bytes(secret_bytes)
+        .and_then(|scalar| scalar.non_zero())
+        .ok_or_else(|| DkgKitError::Protocol("reconstructed HTSS secret is zero".to_string()))?;
+
+    // 2. Group-key invariant: the reshared key MUST match the existing group key.
+    let schnorr = schnorr_fun::new_with_deterministic_nonces::<Sha256>();
+    let keypair = schnorr.new_keypair(secret);
+    if keypair.public_key().to_xonly_bytes() != old.group_key.xonly_public_key {
+        return Err(DkgKitError::Protocol(
+            "reshare would change the group key".to_string(),
+        ));
+    }
+
+    // 3. Fresh polynomial of degree (new threshold - 1), constant term = secret.
+    let mut rng = rand::thread_rng();
+    let secret_term = keypair.secret_key().public().mark_zero();
+    let mut polynomial = Vec::with_capacity(new_config.threshold as usize);
+    polynomial.push(secret_term);
+    for _ in 1..new_config.threshold {
+        polynomial.push(
+            Scalar::<Secret, NonZero>::random(&mut rng)
+                .public()
+                .mark_zero(),
+        );
+    }
+
+    // 4. Evaluate f'^(rank)(id) for each participant in the new config.
+    let shares = new_config
+        .participants
+        .iter()
+        .map(|participant| HtssLocalKeyShare {
+            participant_id: participant.id,
+            rank: participant.rank.0,
+            share_value_bytes: polynomial_derivative_value(
+                &polynomial,
+                participant.id.0,
+                participant.rank.0,
+            )
+            .to_bytes(),
+        })
+        .collect();
+
+    Ok(HtssLocalKeySet {
+        group_key: old.group_key.clone(),
+        shares,
+    })
+}
+
 pub fn htss_dkg_round1(
     participant_id: ParticipantId,
     config: &HierarchicalThresholdConfig,
@@ -2978,5 +3045,94 @@ mod tests {
         ];
         let aggregate = aggregator.aggregate(&shares).unwrap();
         assert!(!aggregate.signature_bytes.is_empty());
+    }
+
+    #[test]
+    fn reshare_to_added_signer_preserves_group_key_and_signs() {
+        let old_config = htss_config(); // threshold 3, participants 1..=5
+        let keyset = run_local_htss_keygen(&old_config).unwrap();
+
+        // New policy: same threshold + ranks, with operator-c (id 6, rank 2) added.
+        let new_config = HierarchicalThresholdConfig::new(
+            3,
+            vec![
+                RankedParticipant::new(1, 0, Some("ceo".to_string())).unwrap(),
+                RankedParticipant::new(2, 1, Some("cfo".to_string())).unwrap(),
+                RankedParticipant::new(3, 1, Some("finance".to_string())).unwrap(),
+                RankedParticipant::new(4, 2, Some("operator-a".to_string())).unwrap(),
+                RankedParticipant::new(5, 2, Some("operator-b".to_string())).unwrap(),
+                RankedParticipant::new(6, 2, Some("operator-c".to_string())).unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let reconstruct_set = vec![pid(1), pid(2), pid(4)]; // valid under old_config
+        let resharded =
+            reshare_htss(&keyset, &old_config, &reconstruct_set, &new_config).unwrap();
+
+        // Group key (and therefore the address) is unchanged.
+        assert_eq!(
+            resharded.group_key.xonly_public_key,
+            keyset.group_key.xonly_public_key
+        );
+        // New share set covers the new participant roster.
+        assert_eq!(resharded.shares.len(), 6);
+
+        // The reshared shares sign a digest that verifies against the SAME group key.
+        let digest = [7u8; 32];
+        let signature = sign_digest_with_local_htss_shares(
+            &resharded.group_key,
+            digest,
+            &resharded.shares,
+            &[pid(1), pid(2), pid(4)],
+            &new_config,
+        )
+        .unwrap();
+        let signature_bytes: [u8; 64] = signature.signature_bytes.try_into().unwrap();
+        let signature = Signature::from_bytes(signature_bytes).unwrap();
+        let public_key =
+            Point::<EvenY, Public>::from_xonly_bytes(resharded.group_key.xonly_public_key).unwrap();
+        let schnorr = schnorr_fun::Schnorr::<Sha256>::verify_only();
+        assert!(schnorr.verify(&public_key, frost_message(&digest), &signature));
+    }
+
+    #[test]
+    fn reshare_keeps_the_secret_constant() {
+        let old_config = htss_config();
+        let keyset = run_local_htss_keygen(&old_config).unwrap();
+        let new_config = HierarchicalThresholdConfig::new(
+            3,
+            vec![
+                RankedParticipant::new(1, 0, Some("ceo".to_string())).unwrap(),
+                RankedParticipant::new(2, 1, Some("cfo".to_string())).unwrap(),
+                RankedParticipant::new(3, 1, Some("finance".to_string())).unwrap(),
+                RankedParticipant::new(4, 2, Some("operator-a".to_string())).unwrap(),
+                RankedParticipant::new(5, 2, Some("operator-b".to_string())).unwrap(),
+                RankedParticipant::new(6, 2, Some("operator-c".to_string())).unwrap(),
+            ],
+        )
+        .unwrap();
+        let resharded =
+            reshare_htss(&keyset, &old_config, &[pid(1), pid(2), pid(4)], &new_config).unwrap();
+
+        let before =
+            reconstruct_htss_secret_scalar(&keyset.shares, &[pid(1), pid(2), pid(4)], &old_config)
+                .unwrap();
+        let after = reconstruct_htss_secret_scalar(
+            &resharded.shares,
+            &[pid(1), pid(2), pid(4)],
+            &new_config,
+        )
+        .unwrap();
+        assert_eq!(before, after, "f(0) must be invariant across a reshare");
+    }
+
+    #[test]
+    fn reshare_rejects_invalid_reconstruct_set() {
+        let config = htss_config();
+        let keyset = run_local_htss_keygen(&config).unwrap();
+        // [2,4,5] is the rank set the existing rejection test proves invalid.
+        let err = reshare_htss(&keyset, &config, &[pid(2), pid(4), pid(5)], &config).unwrap_err();
+        assert!(!err.to_string().is_empty());
     }
 }
